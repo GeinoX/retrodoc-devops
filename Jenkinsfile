@@ -1,23 +1,39 @@
 pipeline {
     agent any
 
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+
+        buildDiscarder(
+            logRotator(
+                numToKeepStr: '20'
+            )
+        )
+    }
+
     parameters {
         string(
             name: 'BACKEND_VERSION',
-            defaultValue: 'latest',
-            description: 'Docker tag for the backend image'
+            defaultValue: '',
+            description: 'Backend Docker image tag. Leave empty to keep the currently deployed version.'
         )
 
         string(
             name: 'FRONTEND_VERSION',
-            defaultValue: 'latest',
-            description: 'Docker tag for the frontend image'
+            defaultValue: '',
+            description: 'Frontend Docker image tag. Leave empty to keep the currently deployed version.'
         )
     }
 
     environment {
         DEPLOY_HOST = '169.58.142.4'
         DEPLOY_DIR = '/opt/retrodoc'
+
+        BACKEND_IMAGE = 'les190/retrodoc-backend'
+        FRONTEND_IMAGE = 'les190/retrodoc-frontend'
+
+        DOCKERHUB_CREDENTIALS = credentials('dockerhub-credentials')
     }
 
     stages {
@@ -30,262 +46,342 @@ pipeline {
 
         stage('Validate') {
             steps {
-                script {
+                sh '''
+                    set -eu
 
-                    def backendVersion =
-                        params.BACKEND_VERSION?.trim() ?: 'latest'
+                    test -f docker-compose.prod.yml
 
-                    def frontendVersion =
-                        params.FRONTEND_VERSION?.trim() ?: 'latest'
+                    echo "Validating production Compose file..."
 
-                    echo "Backend version: ${backendVersion}"
-                    echo "Frontend version: ${frontendVersion}"
+                    # We only validate syntax here.
+                    # The real .env exists on the deployment server.
+                    docker compose \
+                        -f docker-compose.prod.yml \
+                        config --quiet
 
-                    sh """
-                        set -eu
-
-                        test -f docker-compose.prod.yml
-
-                        echo "Production compose file found."
-
-                        trap 'rm -f .env' EXIT
-
-                        cat > .env <<'EOF'
-DB_NAME=retrodoc_validation
-DB_USER=retrodoc_validation
-DB_PASSWORD=validation_password
-BACKEND_VERSION=${backendVersion}
-FRONTEND_VERSION=${frontendVersion}
-EOF
-
-                        docker compose \
-                            -f docker-compose.prod.yml \
-                            config >/dev/null
-
-                        echo "Production Docker Compose configuration is valid."
-
-                        rm -f .env
-                        trap - EXIT
-                    """
-                }
+                    echo "Compose configuration is valid."
+                '''
             }
         }
 
-        stage('Deploy') {
-            when {
-                branch 'main'
-            }
-
+        stage('Deploy to Contabo') {
             steps {
-                script {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'contabo-ssh',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
 
-                    def backendVersion =
-                        params.BACKEND_VERSION?.trim() ?: 'latest'
+                    sh '''
+                        set -eu
 
-                    def frontendVersion =
-                        params.FRONTEND_VERSION?.trim() ?: 'latest'
+                        chmod 600 "$SSH_KEY"
 
-                    withCredentials([
-                        sshUserPrivateKey(
-                            credentialsId: 'contabo-ssh',
-                            keyFileVariable: 'SSH_KEY',
-                            usernameVariable: 'SSH_USER'
-                        )
-                    ]) {
+                        echo "======================================"
+                        echo "Preparing Contabo deployment"
+                        echo "======================================"
 
-                        sh """
-                            set -eu
+                        ssh \
+                            -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=no \
+                            "$SSH_USER@$DEPLOY_HOST" \
+                            "mkdir -p '$DEPLOY_DIR'"
 
-                            echo "Deploying RetroDoc..."
+                        echo "Uploading production Compose file..."
 
-                            echo "Backend:  les190/retrodoc-backend:${backendVersion}"
-                            echo "Frontend: les190/retrodoc-frontend:${frontendVersion}"
+                        scp \
+                            -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=no \
+                            docker-compose.prod.yml \
+                            "$SSH_USER@$DEPLOY_HOST:$DEPLOY_DIR/docker-compose.prod.yml"
 
+                        echo "Logging into Docker Hub on deployment server..."
+
+                        printf '%s' "$DOCKERHUB_CREDENTIALS_PSW" |
                             ssh \
-                                -i "\$SSH_KEY" \
-                                -o BatchMode=yes \
-                                -o StrictHostKeyChecking=accept-new \
-                                "\$SSH_USER@\$DEPLOY_HOST" \
-                                "mkdir -p '$DEPLOY_DIR'"
+                                -i "$SSH_KEY" \
+                                -o StrictHostKeyChecking=no \
+                                "$SSH_USER@$DEPLOY_HOST" \
+                                "docker login -u '$DOCKERHUB_CREDENTIALS_USR' --password-stdin"
 
-                            scp \
-                                -i "\$SSH_KEY" \
-                                -o BatchMode=yes \
-                                -o StrictHostKeyChecking=accept-new \
-                                docker-compose.prod.yml \
-                                "\$SSH_USER@\$DEPLOY_HOST:\$DEPLOY_DIR/docker-compose.prod.yml"
+                        echo "Starting remote deployment..."
 
-                            ssh \
-                                -i "\$SSH_KEY" \
-                                -o BatchMode=yes \
-                                -o StrictHostKeyChecking=accept-new \
-                                "\$SSH_USER@\$DEPLOY_HOST" \
-                                "cd '$DEPLOY_DIR' && \
-                                 test -f .env"
-
-                            ssh \
-                                -i "\$SSH_KEY" \
-                                -o BatchMode=yes \
-                                -o StrictHostKeyChecking=accept-new \
-                                "\$SSH_USER@\$DEPLOY_HOST" <<EOF
+                        ssh \
+                            -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=no \
+                            "$SSH_USER@$DEPLOY_HOST" \
+                            "BACKEND_VERSION='${BACKEND_VERSION}' \
+                             FRONTEND_VERSION='${FRONTEND_VERSION}' \
+                             DEPLOY_DIR='$DEPLOY_DIR' \
+                             BACKEND_IMAGE='$BACKEND_IMAGE' \
+                             FRONTEND_IMAGE='$FRONTEND_IMAGE' \
+                             bash -s" <<'REMOTE_SCRIPT'
 
 set -eu
 
-cd '$DEPLOY_DIR'
+cd "$DEPLOY_DIR"
 
-export BACKEND_VERSION='${backendVersion}'
-export FRONTEND_VERSION='${frontendVersion}'
+STATE_FILE="$DEPLOY_DIR/.deployed_versions"
+DEPLOY_ENV="$DEPLOY_DIR/.deployment.env"
 
-echo "Checking Docker..."
+echo
+echo "======================================"
+echo "Reading currently deployed versions"
+echo "======================================"
 
-docker --version
-docker compose version
+CURRENT_BACKEND=""
+CURRENT_FRONTEND=""
 
-echo "Pulling exact backend image..."
+if [ -f "$STATE_FILE" ]; then
+    CURRENT_BACKEND="$(awk -F= '$1=="BACKEND_VERSION"{print $2}' "$STATE_FILE" || true)"
+    CURRENT_FRONTEND="$(awk -F= '$1=="FRONTEND_VERSION"{print $2}' "$STATE_FILE" || true)"
+fi
 
-docker pull "les190/retrodoc-backend:\$BACKEND_VERSION"
+echo "Current backend:  ${CURRENT_BACKEND:-none}"
+echo "Current frontend: ${CURRENT_FRONTEND:-none}"
 
-echo "Pulling exact frontend image..."
+#
+# If Jenkins supplied a version, deploy it.
+# Otherwise retain the currently deployed version.
+#
+BACKEND_VERSION="${BACKEND_VERSION:-$CURRENT_BACKEND}"
+FRONTEND_VERSION="${FRONTEND_VERSION:-$CURRENT_FRONTEND}"
 
-docker pull "les190/retrodoc-frontend:\$FRONTEND_VERSION"
+#
+# Initial deployment fallback.
+#
+BACKEND_VERSION="${BACKEND_VERSION:-latest}"
+FRONTEND_VERSION="${FRONTEND_VERSION:-latest}"
 
-echo "Starting PostgreSQL and Redis..."
+echo
+echo "======================================"
+echo "Target versions"
+echo "======================================"
+
+echo "Backend:  $BACKEND_VERSION"
+echo "Frontend: $FRONTEND_VERSION"
+
+#
+# The deployment env contains only image versions.
+# Application secrets remain in /opt/retrodoc/.env.
+#
+cat > "$DEPLOY_ENV" <<EOF
+BACKEND_VERSION=$BACKEND_VERSION
+FRONTEND_VERSION=$FRONTEND_VERSION
+EOF
+
+chmod 600 "$DEPLOY_ENV"
+
+echo
+echo "======================================"
+echo "Validating deployment environment"
+echo "======================================"
+
+test -f "$DEPLOY_DIR/.env"
+
+echo "Production .env found."
+
+echo
+echo "======================================"
+echo "Pulling backend image"
+echo "======================================"
+
+docker pull "$BACKEND_IMAGE:$BACKEND_VERSION"
+
+echo
+echo "======================================"
+echo "Pulling frontend image"
+echo "======================================"
+
+docker pull "$FRONTEND_IMAGE:$FRONTEND_VERSION"
+
+echo
+echo "======================================"
+echo "Validating Docker Compose"
+echo "======================================"
 
 docker compose \
+    --env-file "$DEPLOY_DIR/.env" \
+    --env-file "$DEPLOY_ENV" \
+    -f docker-compose.prod.yml \
+    config --quiet
+
+echo "Compose validation successful."
+
+echo
+echo "======================================"
+echo "Starting PostgreSQL and Redis"
+echo "======================================"
+
+docker compose \
+    --env-file "$DEPLOY_DIR/.env" \
+    --env-file "$DEPLOY_ENV" \
     -f docker-compose.prod.yml \
     up -d postgres redis
 
-echo "Waiting for PostgreSQL and Redis..."
-
+echo
+echo "Waiting for infrastructure..."
 sleep 10
 
-echo "Starting backend..."
+echo
+echo "======================================"
+echo "Starting application services"
+echo "======================================"
 
 docker compose \
+    --env-file "$DEPLOY_DIR/.env" \
+    --env-file "$DEPLOY_ENV" \
     -f docker-compose.prod.yml \
-    up -d backend
+    up -d backend celery frontend
 
-echo "Waiting for backend..."
+echo
+echo "Waiting for application startup..."
+sleep 15
 
-sleep 10
-
-echo "Running database migrations..."
+echo
+echo "======================================"
+echo "Running database migrations"
+echo "======================================"
 
 docker compose \
+    --env-file "$DEPLOY_DIR/.env" \
+    --env-file "$DEPLOY_ENV" \
     -f docker-compose.prod.yml \
     exec -T backend \
     python manage.py migrate --noinput
 
-echo "Collecting static files..."
+echo
+echo "======================================"
+echo "Collecting static files"
+echo "======================================"
 
 docker compose \
+    --env-file "$DEPLOY_DIR/.env" \
+    --env-file "$DEPLOY_ENV" \
     -f docker-compose.prod.yml \
     exec -T backend \
     python manage.py collectstatic --noinput
 
-echo "Running Django deployment checks..."
+echo
+echo "======================================"
+echo "Django deployment checks"
+echo "======================================"
 
 docker compose \
+    --env-file "$DEPLOY_DIR/.env" \
+    --env-file "$DEPLOY_ENV" \
     -f docker-compose.prod.yml \
     exec -T backend \
     python manage.py check --deploy
 
-echo "Starting Celery..."
+echo
+echo "======================================"
+echo "Container status"
+echo "======================================"
 
 docker compose \
-    -f docker-compose.prod.yml \
-    up -d --force-recreate celery
-
-echo "Starting frontend..."
-
-docker compose \
-    -f docker-compose.prod.yml \
-    up -d --force-recreate frontend
-
-echo "Waiting for services..."
-
-sleep 10
-
-echo "Container status:"
-
-docker compose \
+    --env-file "$DEPLOY_DIR/.env" \
+    --env-file "$DEPLOY_ENV" \
     -f docker-compose.prod.yml \
     ps
 
-echo "Checking frontend..."
+echo
+echo "======================================"
+echo "Backend health check"
+echo "======================================"
 
-curl \
+if curl \
     --fail \
     --silent \
     --show-error \
+    --max-time 15 \
+    http://127.0.0.1:8000/ \
+    >/dev/null
+then
+    echo "Backend health check: OK"
+else
+    echo "Backend health check: FAILED"
+
+    docker compose \
+        --env-file "$DEPLOY_DIR/.env" \
+        --env-file "$DEPLOY_ENV" \
+        -f docker-compose.prod.yml \
+        logs --tail=100 backend
+
+    exit 1
+fi
+
+echo
+echo "======================================"
+echo "Frontend health check"
+echo "======================================"
+
+if curl \
+    --fail \
+    --silent \
+    --show-error \
+    --max-time 15 \
     http://127.0.0.1:3000/ \
     >/dev/null
-
-echo "Frontend health check passed."
-
-echo "Checking backend..."
-
-BACKEND_STATUS=\$(curl \
-    --silent \
-    --output /dev/null \
-    --write-out '%{http_code}' \
-    http://127.0.0.1:8000/ || true)
-
-echo "Backend HTTP status: \$BACKEND_STATUS"
-
-if [ "\$BACKEND_STATUS" = "000" ]; then
-
-    echo "Backend is unreachable."
+then
+    echo "Frontend health check: OK"
+else
+    echo "Frontend health check: FAILED"
 
     docker compose \
+        --env-file "$DEPLOY_DIR/.env" \
+        --env-file "$DEPLOY_ENV" \
         -f docker-compose.prod.yml \
-        logs \
-        --tail=150 \
-        backend
+        logs --tail=100 frontend
 
     exit 1
-
 fi
 
-echo "Backend health check passed."
+echo
+echo "======================================"
+echo "Celery verification"
+echo "======================================"
 
-echo "Checking Celery..."
+docker compose \
+    --env-file "$DEPLOY_DIR/.env" \
+    --env-file "$DEPLOY_ENV" \
+    -f docker-compose.prod.yml \
+    ps celery
 
-CELERY_STATUS=\$(docker inspect \
-    --format='{{.State.Running}}' \
-    retrodoc-celery 2>/dev/null || true)
+docker compose \
+    --env-file "$DEPLOY_DIR/.env" \
+    --env-file "$DEPLOY_ENV" \
+    -f docker-compose.prod.yml \
+    logs --tail=30 celery
 
-if [ "\$CELERY_STATUS" != "true" ]; then
+echo
+echo "======================================"
+echo "Saving deployed versions"
+echo "======================================"
 
-    echo "Celery is not running."
-
-    docker compose \
-        -f docker-compose.prod.yml \
-        logs \
-        --tail=150 \
-        celery
-
-    exit 1
-
-fi
-
-echo "Celery health check passed."
-
-echo "Saving deployed versions..."
-
-cat > .deployed_versions <<VERSION_EOF
-BACKEND_VERSION=\$BACKEND_VERSION
-FRONTEND_VERSION=\$FRONTEND_VERSION
-DEPLOYED_AT=\$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-VERSION_EOF
-
-echo "Deployment successful."
-
-cat .deployed_versions
-
+cat > "$STATE_FILE" <<EOF
+BACKEND_VERSION=$BACKEND_VERSION
+FRONTEND_VERSION=$FRONTEND_VERSION
+DEPLOYED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 EOF
-                        """
-                    }
+
+chmod 600 "$STATE_FILE"
+
+rm -f "$DEPLOY_ENV"
+
+echo
+echo "======================================"
+echo "PRODUCTION DEPLOYMENT SUCCESSFUL"
+echo "======================================"
+
+echo "Backend:  $BACKEND_VERSION"
+echo "Frontend: $FRONTEND_VERSION"
+echo "Deployed: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+REMOTE_SCRIPT
+                    '''
                 }
             }
         }
@@ -293,21 +389,11 @@ EOF
 
     post {
         success {
-            echo '======================================'
-            echo 'RetroDoc deployment SUCCESSFUL'
-            echo '======================================'
+            echo 'RetroDoc production deployment completed successfully.'
         }
 
         failure {
-            echo '======================================'
-            echo 'RetroDoc deployment FAILED'
-            echo '======================================'
-
-            echo 'Check the deployment logs and container status.'
-        }
-
-        always {
-            echo 'RetroDoc DevOps pipeline finished.'
+            echo 'RetroDoc production deployment failed.'
         }
     }
 }
