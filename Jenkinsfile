@@ -1,4 +1,3 @@
-
 pipeline {
     agent any
 
@@ -141,80 +140,44 @@ EOF
                     )
                 ]) {
 
-                    sh '''
-                        set -eu
+                    withEnv([
+                        "DEPLOY_BACKEND_VERSION=${params.BACKEND_VERSION ?: ''}",
+                        "DEPLOY_FRONTEND_VERSION=${params.FRONTEND_VERSION ?: ''}"
+                    ]) {
 
-                        echo "========================================"
-                        echo " Preparing Contabo deployment"
-                        echo "========================================"
+                        sh '''
+                            set -eu
 
-                        echo "Deploy host: $DEPLOY_HOST"
-                        echo "Deploy user: $SSH_USER"
-                        echo "Deploy directory: $DEPLOY_DIR"
+                            echo "========================================"
+                            echo " Preparing Contabo deployment"
+                            echo "========================================"
 
-
-                        # ====================================================
-                        # VERIFY SSHPASS
-                        # ====================================================
-
-                        echo "========================================"
-                        echo " Verifying sshpass"
-                        echo "========================================"
-
-                        command -v sshpass
-
-                        echo "sshpass is available."
+                            echo "Deploy host: $DEPLOY_HOST"
+                            echo "Deploy user: $SSH_USER"
+                            echo "Deploy directory: $DEPLOY_DIR"
 
 
-                        # ====================================================
-                        # TEST SSH CONNECTION
-                        # ====================================================
+                            # ====================================================
+                            # VERIFY SSHPASS
+                            # ====================================================
 
-                        echo "========================================"
-                        echo " Testing SSH connection to Contabo"
-                        echo "========================================"
+                            echo "========================================"
+                            echo " Verifying sshpass"
+                            echo "========================================"
 
-                        sshpass -p "$SSH_PASSWORD" \
-                        ssh \
-                            -o StrictHostKeyChecking=no \
-                            -o UserKnownHostsFile=/dev/null \
-                            -o PubkeyAuthentication=no \
-                            -o PreferredAuthentications=password \
-                            "$SSH_USER@$DEPLOY_HOST" \
-                            "echo 'SSH password authentication successful.'"
+                            command -v sshpass
 
-                        echo "SSH connection successful."
+                            echo "sshpass is available."
 
 
-                        # ====================================================
-                        # COPY COMPOSE FILE
-                        # ====================================================
+                            # ====================================================
+                            # TEST SSH CONNECTION
+                            # ====================================================
 
-                        echo "========================================"
-                        echo " Copying production Compose file"
-                        echo "========================================"
+                            echo "========================================"
+                            echo " Testing SSH connection to Contabo"
+                            echo "========================================"
 
-                        sshpass -p "$SSH_PASSWORD" \
-                        scp \
-                            -o StrictHostKeyChecking=no \
-                            -o UserKnownHostsFile=/dev/null \
-                            -o PubkeyAuthentication=no \
-                            -o PreferredAuthentications=password \
-                            docker-compose.prod.yml \
-                            "$SSH_USER@$DEPLOY_HOST:$DEPLOY_DIR/docker-compose.prod.yml"
-
-                        echo "Docker Compose file copied."
-
-
-                        # ====================================================
-                        # DOCKER HUB LOGIN
-                        # ====================================================
-
-                        echo "========================================"
-                        echo " Logging in to Docker Hub"
-                        echo "========================================"
-
-                        printf '%s' "$DOCKERHUB_CREDENTIALS_PSW" | \
                             sshpass -p "$SSH_PASSWORD" \
                             ssh \
                                 -o StrictHostKeyChecking=no \
@@ -222,27 +185,81 @@ EOF
                                 -o PubkeyAuthentication=no \
                                 -o PreferredAuthentications=password \
                                 "$SSH_USER@$DEPLOY_HOST" \
-                                "docker login -u '$DOCKERHUB_CREDENTIALS_USR' --password-stdin"
+                                "echo 'SSH password authentication successful.'"
 
-                        echo "Docker Hub login successful."
+                            echo "SSH connection successful."
 
 
-                        # ====================================================
-                        # REMOTE DEPLOYMENT
-                        # ====================================================
+                            # ====================================================
+                            # COPY COMPOSE FILE
+                            # ====================================================
 
-                        echo "========================================"
-                        echo " Starting remote deployment"
-                        echo "========================================"
+                            echo "========================================"
+                            echo " Copying production Compose file"
+                            echo "========================================"
 
-                        sshpass -p "$SSH_PASSWORD" \
-                        ssh \
-                            -o StrictHostKeyChecking=no \
-                            -o UserKnownHostsFile=/dev/null \
-                            -o PubkeyAuthentication=no \
-                            -o PreferredAuthentications=password \
-                            "$SSH_USER@$DEPLOY_HOST" \
-                            "DEPLOY_DIR='$DEPLOY_DIR' BACKEND_IMAGE='$BACKEND_IMAGE' FRONTEND_IMAGE='$FRONTEND_IMAGE' BACKEND_VERSION='${params.BACKEND_VERSION}' FRONTEND_VERSION='${params.FRONTEND_VERSION}' bash -s" <<'REMOTE_SCRIPT'
+                            sshpass -p "$SSH_PASSWORD" \
+                            scp \
+                                -o StrictHostKeyChecking=no \
+                                -o UserKnownHostsFile=/dev/null \
+                                -o PubkeyAuthentication=no \
+                                -o PreferredAuthentications=password \
+                                docker-compose.prod.yml \
+                                "$SSH_USER@$DEPLOY_HOST:$DEPLOY_DIR/docker-compose.prod.yml"
+
+                            echo "Docker Compose file copied."
+
+
+                            # ====================================================
+                            # DOCKER HUB LOGIN
+                            # ====================================================
+
+                            echo "========================================"
+                            echo " Logging in to Docker Hub"
+                            echo "========================================"
+
+                            printf '%s' "$DOCKERHUB_CREDENTIALS_PSW" | \
+                                sshpass -p "$SSH_PASSWORD" \
+                                ssh \
+                                    -o StrictHostKeyChecking=no \
+                                    -o UserKnownHostsFile=/dev/null \
+                                    -o PubkeyAuthentication=no \
+                                    -o PreferredAuthentications=password \
+                                    "$SSH_USER@$DEPLOY_HOST" \
+                                    "docker login -u '$DOCKERHUB_CREDENTIALS_USR' --password-stdin"
+
+                            echo "Docker Hub login successful."
+
+
+                            # ====================================================
+                            # REMOTE DEPLOYMENT
+                            # ====================================================
+
+                            echo "========================================"
+                            echo " Starting remote deployment"
+                            echo "========================================"
+
+                            if [ -n "$DEPLOY_BACKEND_VERSION" ]; then
+                                echo "Requested backend version: $DEPLOY_BACKEND_VERSION"
+                            else
+                                echo "Requested backend version: current/latest fallback"
+                            fi
+
+                            if [ -n "$DEPLOY_FRONTEND_VERSION" ]; then
+                                echo "Requested frontend version: $DEPLOY_FRONTEND_VERSION"
+                            else
+                                echo "Requested frontend version: current/latest fallback"
+                            fi
+
+
+                            sshpass -p "$SSH_PASSWORD" \
+                            ssh \
+                                -o StrictHostKeyChecking=no \
+                                -o UserKnownHostsFile=/dev/null \
+                                -o PubkeyAuthentication=no \
+                                -o PreferredAuthentications=password \
+                                "$SSH_USER@$DEPLOY_HOST" \
+                                "DEPLOY_DIR='$DEPLOY_DIR' BACKEND_IMAGE='$BACKEND_IMAGE' FRONTEND_IMAGE='$FRONTEND_IMAGE' DEPLOY_BACKEND_VERSION='$DEPLOY_BACKEND_VERSION' DEPLOY_FRONTEND_VERSION='$DEPLOY_FRONTEND_VERSION' bash -s" <<'REMOTE_SCRIPT'
 
 set -eu
 
@@ -260,7 +277,9 @@ echo "$DEPLOY_DIR"
 # CHECK PRODUCTION ENVIRONMENT
 # ============================================================
 
-echo "Checking production environment..."
+echo "========================================"
+echo " Checking production environment"
+echo "========================================"
 
 if [ ! -f .env ]; then
 
@@ -280,7 +299,9 @@ echo "Production environment found."
 # READ CURRENT DEPLOYMENT
 # ============================================================
 
-echo "Reading current deployment versions..."
+echo "========================================"
+echo " Reading current deployment versions"
+echo "========================================"
 
 CURRENT_BACKEND=""
 CURRENT_FRONTEND=""
@@ -299,14 +320,21 @@ if [ -f .deployed_versions ]; then
 
 fi
 
+echo "Current backend version: ${CURRENT_BACKEND:-none}"
+echo "Current frontend version: ${CURRENT_FRONTEND:-none}"
+
 
 # ============================================================
 # DETERMINE TARGET BACKEND VERSION
 # ============================================================
 
-if [ -n "$BACKEND_VERSION" ]; then
+echo "========================================"
+echo " Determining backend version"
+echo "========================================"
 
-    TARGET_BACKEND="$BACKEND_VERSION"
+if [ -n "$DEPLOY_BACKEND_VERSION" ]; then
+
+    TARGET_BACKEND="$DEPLOY_BACKEND_VERSION"
 
 elif [ -n "$CURRENT_BACKEND" ]; then
 
@@ -318,14 +346,20 @@ else
 
 fi
 
+echo "Target backend: $TARGET_BACKEND"
+
 
 # ============================================================
 # DETERMINE TARGET FRONTEND VERSION
 # ============================================================
 
-if [ -n "$FRONTEND_VERSION" ]; then
+echo "========================================"
+echo " Determining frontend version"
+echo "========================================"
 
-    TARGET_FRONTEND="$FRONTEND_VERSION"
+if [ -n "$DEPLOY_FRONTEND_VERSION" ]; then
+
+    TARGET_FRONTEND="$DEPLOY_FRONTEND_VERSION"
 
 elif [ -n "$CURRENT_FRONTEND" ]; then
 
@@ -336,6 +370,8 @@ else
     TARGET_FRONTEND="latest"
 
 fi
+
+echo "Target frontend: $TARGET_FRONTEND"
 
 
 # ============================================================
@@ -357,7 +393,9 @@ echo "$FRONTEND_IMAGE:$TARGET_FRONTEND"
 # CREATE DEPLOYMENT ENVIRONMENT
 # ============================================================
 
-echo "Creating deployment version file..."
+echo "========================================"
+echo " Creating deployment version file"
+echo "========================================"
 
 cat > .deployment.env <<EOF
 BACKEND_VERSION=$TARGET_BACKEND
@@ -726,4 +764,3 @@ REMOTE_SCRIPT
         }
     }
 }
-
