@@ -1,0 +1,111 @@
+services:
+  # ==========================================================
+  # PostgreSQL Database
+  # ==========================================================
+  postgres:
+    image: postgres:17
+    container_name: retrodoc-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    networks:
+      - retrodoc_network
+
+  # ==========================================================
+  # Redis
+  # ==========================================================
+  redis:
+    image: redis:7-alpine
+    container_name: retrodoc-redis
+    restart: unless-stopped
+
+    volumes:
+      - redis_data:/data
+
+    networks:
+      - retrodoc_network
+
+  # ==========================================================
+  # Django Backend
+  # ==========================================================
+  backend:
+    image: retrodoc-backend:latest
+    container_name: retrodoc-backend
+    restart: unless-stopped
+
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.production
+
+      SECRET_KEY: ${SECRET_KEY}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS}
+
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: postgres
+      DB_PORT: 5432
+
+      REDIS_URL: redis://redis:6379/0
+
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL}
+
+      EMAIL_BACKEND: ${EMAIL_BACKEND}
+      EMAIL_HOST: ${EMAIL_HOST}
+      EMAIL_PORT: ${EMAIL_PORT}
+      EMAIL_USE_TLS: ${EMAIL_USE_TLS}
+      EMAIL_USE_SSL: ${EMAIL_USE_SSL}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD}
+      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL}
+      SERVER_EMAIL: ${SERVER_EMAIL}
+      EMAIL_TIMEOUT: ${EMAIL_TIMEOUT}
+
+    depends_on:
+      - postgres
+      - redis
+
+    ports:
+      - "8000:8000"
+
+    networks:
+      - retrodoc_network
+
+  # ==========================================================
+  # React Frontend
+  # ==========================================================
+  frontend:
+    image: my-react-frontend:latest
+    container_name: retrodoc-frontend
+    restart: unless-stopped
+
+    depends_on:
+      - backend
+
+    ports:
+      - "3000:80"
+
+    networks:
+      - retrodoc_network
+
+# ============================================================
+# Persistent Volumes
+# ============================================================
+volumes:
+  postgres_data:
+  redis_data:
+
+# ============================================================
+# Network
+# ============================================================
+networks:
+  retrodoc_network:
+    driver: bridge
