@@ -3,14 +3,18 @@ services:
     image: postgres:17
     container_name: retrodoc-postgres
     restart: unless-stopped
+
     env_file:
       - .env
+
     environment:
       POSTGRES_DB: ${DB_NAME}
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
+
     volumes:
       - postgres_data:/var/lib/postgresql/data
+
     networks:
       - retrodoc_network
 
@@ -18,55 +22,77 @@ services:
     image: redis:7-alpine
     container_name: retrodoc-redis
     restart: unless-stopped
+
     networks:
       - retrodoc_network
 
   backend:
     image: les190/retrodoc-backend:${BACKEND_VERSION}
+
     container_name: retrodoc-backend
     restart: unless-stopped
+
     env_file:
       - .env
+
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.production
       DB_HOST: postgres
-      DB_PORT: 5432
+      DB_PORT: "5432"
       REDIS_URL: redis://redis:6379/0
+
     depends_on:
       - postgres
       - redis
+
     ports:
       - "8000:8000"
+
     networks:
       - retrodoc_network
 
   celery:
     image: les190/retrodoc-backend:${BACKEND_VERSION}
+
     container_name: retrodoc-celery
     restart: unless-stopped
+
     env_file:
       - .env
+
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.production
       DB_HOST: postgres
-      DB_PORT: 5432
+      DB_PORT: "5432"
       REDIS_URL: redis://redis:6379/0
-    command: celery -A config worker --loglevel=info
+
+    command:
+      - celery
+      - -A
+      - config
+      - worker
+      - --loglevel=info
+
     depends_on:
       - postgres
       - redis
       - backend
+
     networks:
       - retrodoc_network
 
   frontend:
     image: les190/retrodoc-frontend:${FRONTEND_VERSION}
+
     container_name: retrodoc-frontend
     restart: unless-stopped
+
     depends_on:
       - backend
+
     ports:
       - "3000:80"
+
     networks:
       - retrodoc_network
 
