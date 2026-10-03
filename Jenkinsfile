@@ -25,21 +25,26 @@ pipeline {
 
                     echo "Production compose file found."
 
-                    # Jenkins must not require the production .env file.
-                    # The real .env exists only on the Contabo server.
-                    #
-                    # Provide harmless validation values so Docker Compose
-                    # can parse the file without exposing production secrets.
+                    # docker-compose.prod.yml explicitly references .env.
+                    # Jenkins must not use or contain the real production .env.
+                    # Create a temporary validation file only for Compose parsing.
 
-                    export DB_NAME=retrodoc_validation
-                    export DB_USER=retrodoc_validation
-                    export DB_PASSWORD=validation_password
-                    export BACKEND_VERSION=latest
-                    export FRONTEND_VERSION=latest
+                    trap 'rm -f .env' EXIT
+
+                    cat > .env <<'EOF'
+DB_NAME=retrodoc_validation
+DB_USER=retrodoc_validation
+DB_PASSWORD=validation_password
+BACKEND_VERSION=latest
+FRONTEND_VERSION=latest
+EOF
 
                     docker compose -f docker-compose.prod.yml config >/dev/null
 
                     echo "Production Docker Compose configuration is valid."
+
+                    rm -f .env
+                    trap - EXIT
                 '''
             }
         }
@@ -95,6 +100,8 @@ cd '$DEPLOY_DIR'
 echo "Checking production environment..."
 
 test -f .env
+
+echo "Production environment file found."
 
 echo "Pulling backend image..."
 
