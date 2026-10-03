@@ -23,6 +23,20 @@ pipeline {
 
                     test -f docker-compose.prod.yml
 
+                    echo "Production compose file found."
+
+                    # Jenkins must not require the production .env file.
+                    # The real .env exists only on the Contabo server.
+                    #
+                    # Provide harmless validation values so Docker Compose
+                    # can parse the file without exposing production secrets.
+
+                    export DB_NAME=retrodoc_validation
+                    export DB_USER=retrodoc_validation
+                    export DB_PASSWORD=validation_password
+                    export BACKEND_VERSION=latest
+                    export FRONTEND_VERSION=latest
+
                     docker compose -f docker-compose.prod.yml config >/dev/null
 
                     echo "Production Docker Compose configuration is valid."
@@ -66,7 +80,7 @@ pipeline {
                                 docker-compose.prod.yml \
                                 "$SSH_USER@$DEPLOY_HOST:$DEPLOY_DIR/docker-compose.prod.yml"
 
-                            echo "Production deployment started..."
+                            echo "Starting production deployment..."
 
                             ssh \
                                 -i "$SSH_KEY" \
@@ -78,9 +92,16 @@ set -eu
 
 cd '$DEPLOY_DIR'
 
-echo "Pulling latest production images..."
+echo "Checking production environment..."
+
+test -f .env
+
+echo "Pulling backend image..."
 
 docker pull les190/retrodoc-backend:latest
+
+echo "Pulling frontend image..."
+
 docker pull les190/retrodoc-frontend:latest
 
 echo "Starting PostgreSQL and Redis..."
@@ -140,7 +161,7 @@ fi
 
 echo "Backend HTTP status: \$BACKEND_STATUS"
 
-echo "RetroDoc deployment completed successfully."
+echo "RetroDoc production deployment completed successfully."
 
 EOF
                         '''
