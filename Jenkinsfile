@@ -48,13 +48,6 @@ pipeline {
         /*
          * ============================================================
          * VALIDATE
-         *
-         * The production compose file references .env.
-         * Jenkins does NOT have the production .env and should never
-         * receive the production secrets.
-         *
-         * Therefore we create a temporary validation-only .env.
-         * It is automatically deleted when this stage finishes.
          * ============================================================
          */
 
@@ -128,13 +121,11 @@ EOF
         /*
          * ============================================================
          * DEPLOY TO CONTABO
-         *
-         * Only the main branch is allowed to deploy production.
-         * Feature branches only validate the infrastructure.
          * ============================================================
          */
 
         stage('Deploy to Contabo') {
+
             when {
                 branch 'main'
             }
@@ -163,15 +154,63 @@ EOF
                         ssh-keyscan -H "$DEPLOY_HOST" \
                             >> ~/.ssh/known_hosts 2>/dev/null || true
 
-                        echo "Copying production Compose file..."
+
+                        # ====================================================
+                        # VERIFY JENKINS SSH PRIVATE KEY
+                        # ====================================================
+
+                        echo "========================================"
+                        echo " Verifying Jenkins SSH private key"
+                        echo "========================================"
+
+                        KEY_FINGERPRINT="$(
+                            ssh-keygen -y -f "$SSH_KEY" \
+                            | ssh-keygen -lf -
+                        )"
+
+                        echo "Jenkins SSH key fingerprint:"
+                        echo "$KEY_FINGERPRINT"
+
+                        echo "SSH private key is readable."
+
+
+                        # ====================================================
+                        # TEST SSH CONNECTION
+                        # ====================================================
+
+                        echo "========================================"
+                        echo " Testing SSH connection to Contabo"
+                        echo "========================================"
+
+                        ssh \
+                            -i "$SSH_KEY" \
+                            -o BatchMode=yes \
+                            -o StrictHostKeyChecking=yes \
+                            "$SSH_USER@$DEPLOY_HOST" \
+                            "echo 'SSH connection successful.'"
+
+
+                        # ====================================================
+                        # COPY COMPOSE FILE
+                        # ====================================================
+
+                        echo "========================================"
+                        echo " Copying production Compose file"
+                        echo "========================================"
 
                         scp \
                             -i "$SSH_KEY" \
+                            -o BatchMode=yes \
                             -o StrictHostKeyChecking=yes \
                             docker-compose.prod.yml \
                             "$SSH_USER@$DEPLOY_HOST:$DEPLOY_DIR/docker-compose.prod.yml"
 
                         echo "Docker Compose file copied."
+
+
+                        # ====================================================
+                        # DOCKER HUB LOGIN
+                        # ====================================================
 
                         echo "========================================"
                         echo " Logging in to Docker Hub"
@@ -180,11 +219,17 @@ EOF
                         printf '%s' "$DOCKERHUB_CREDENTIALS_PSW" | \
                             ssh \
                                 -i "$SSH_KEY" \
+                                -o BatchMode=yes \
                                 -o StrictHostKeyChecking=yes \
                                 "$SSH_USER@$DEPLOY_HOST" \
                                 "docker login -u '$DOCKERHUB_CREDENTIALS_USR' --password-stdin"
 
                         echo "Docker Hub login successful."
+
+
+                        # ====================================================
+                        # REMOTE DEPLOYMENT
+                        # ====================================================
 
                         echo "========================================"
                         echo " Starting remote deployment"
@@ -192,6 +237,7 @@ EOF
 
                         ssh \
                             -i "$SSH_KEY" \
+                            -o BatchMode=yes \
                             -o StrictHostKeyChecking=yes \
                             "$SSH_USER@$DEPLOY_HOST" \
                             "BACKEND_VERSION='$BACKEND_VERSION' FRONTEND_VERSION='$FRONTEND_VERSION' DEPLOY_DIR='$DEPLOY_DIR' BACKEND_IMAGE='$BACKEND_IMAGE' FRONTEND_IMAGE='$FRONTEND_IMAGE' bash -s" <<'REMOTE_SCRIPT'
@@ -207,18 +253,25 @@ echo "========================================"
 echo "Deployment directory:"
 echo "$DEPLOY_DIR"
 
+
+# ============================================================
+# CHECK PRODUCTION ENVIRONMENT
+# ============================================================
+
 echo "Checking production environment..."
 
 if [ ! -f .env ]; then
+
     echo "ERROR: Production .env does not exist:"
     echo "$DEPLOY_DIR/.env"
+
     exit 1
+
 fi
 
 chmod 600 .env
 
 echo "Production environment found."
-
 
 
 # ============================================================
@@ -245,7 +298,6 @@ if [ -f .deployed_versions ]; then
 fi
 
 
-
 # ============================================================
 # DETERMINE TARGET BACKEND VERSION
 # ============================================================
@@ -263,7 +315,6 @@ else
     TARGET_BACKEND="latest"
 
 fi
-
 
 
 # ============================================================
@@ -285,6 +336,9 @@ else
 fi
 
 
+# ============================================================
+# DISPLAY DEPLOYMENT VERSIONS
+# ============================================================
 
 echo "========================================"
 echo " Deployment versions"
@@ -295,7 +349,6 @@ echo "$BACKEND_IMAGE:$TARGET_BACKEND"
 
 echo "Frontend:"
 echo "$FRONTEND_IMAGE:$TARGET_FRONTEND"
-
 
 
 # ============================================================
@@ -318,7 +371,6 @@ cleanup_deployment_env() {
 trap cleanup_deployment_env EXIT
 
 
-
 # ============================================================
 # VALIDATE PRODUCTION COMPOSE
 # ============================================================
@@ -336,7 +388,6 @@ env \
         config --quiet
 
 echo "Production Compose configuration is valid."
-
 
 
 # ============================================================
@@ -362,7 +413,6 @@ docker pull \
 echo "Frontend image pulled."
 
 
-
 # ============================================================
 # START DATABASE + REDIS
 # ============================================================
@@ -384,7 +434,6 @@ echo "PostgreSQL and Redis started."
 echo "Waiting for infrastructure..."
 
 sleep 10
-
 
 
 # ============================================================
@@ -410,7 +459,6 @@ echo "Waiting for application startup..."
 sleep 15
 
 
-
 # ============================================================
 # DATABASE MIGRATIONS
 # ============================================================
@@ -429,7 +477,6 @@ env \
         python manage.py migrate --noinput
 
 echo "Database migrations completed."
-
 
 
 # ============================================================
@@ -452,7 +499,6 @@ env \
 echo "Static files collected."
 
 
-
 # ============================================================
 # DJANGO PRODUCTION CHECK
 # ============================================================
@@ -473,7 +519,6 @@ env \
 echo "Django production checks passed."
 
 
-
 # ============================================================
 # CONTAINER STATUS
 # ============================================================
@@ -489,7 +534,6 @@ env \
         --env-file .env \
         -f docker-compose.prod.yml \
         ps
-
 
 
 # ============================================================
@@ -531,7 +575,6 @@ case "$BACKEND_STATUS" in
 esac
 
 
-
 # ============================================================
 # FRONTEND HEALTH CHECK
 # ============================================================
@@ -566,10 +609,10 @@ case "$FRONTEND_STATUS" in
             logs --tail=100 frontend
 
         exit 1
+
         ;;
 
 esac
-
 
 
 # ============================================================
@@ -603,7 +646,6 @@ else
 fi
 
 
-
 # ============================================================
 # SAVE DEPLOYED VERSIONS
 # ============================================================
@@ -620,7 +662,6 @@ EOF
 chmod 600 .deployed_versions
 
 echo "Deployment versions recorded."
-
 
 
 # ============================================================
@@ -650,6 +691,7 @@ echo ""
 echo "Deployment completed successfully."
 
 REMOTE_SCRIPT
+
                     '''
                 }
             }
