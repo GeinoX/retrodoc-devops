@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -241,7 +242,7 @@ EOF
                             -o PubkeyAuthentication=no \
                             -o PreferredAuthentications=password \
                             "$SSH_USER@$DEPLOY_HOST" \
-                            "BACKEND_VERSION='$BACKEND_VERSION' FRONTEND_VERSION='$FRONTEND_VERSION' DEPLOY_DIR='$DEPLOY_DIR' BACKEND_IMAGE='$BACKEND_IMAGE' FRONTEND_IMAGE='$FRONTEND_IMAGE' bash -s" <<'REMOTE_SCRIPT'
+                            "DEPLOY_DIR='$DEPLOY_DIR' BACKEND_IMAGE='$BACKEND_IMAGE' FRONTEND_IMAGE='$FRONTEND_IMAGE' BACKEND_VERSION='${params.BACKEND_VERSION}' FRONTEND_VERSION='${params.FRONTEND_VERSION}' bash -s" <<'REMOTE_SCRIPT'
 
 set -eu
 
@@ -725,3 +726,4 @@ REMOTE_SCRIPT
         }
     }
 }
+
