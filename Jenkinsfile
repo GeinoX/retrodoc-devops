@@ -32,32 +32,107 @@ pipeline {
 
     stages {
 
+        /*
+         * ============================================================
+         * CHECKOUT
+         * ============================================================
+         */
+
         stage('Checkout') {
             steps {
                 checkout scm
             }
         }
 
+
+        /*
+         * ============================================================
+         * VALIDATE
+         *
+         * The production compose file references .env.
+         * Jenkins does NOT have the production .env and should never
+         * receive the production secrets.
+         *
+         * Therefore we create a temporary validation-only .env.
+         * It is automatically deleted when this stage finishes.
+         * ============================================================
+         */
+
         stage('Validate') {
             steps {
                 sh '''
                     set -eu
 
+                    echo "========================================"
+                    echo " Validating Docker Compose configuration"
+                    echo "========================================"
+
                     test -f docker-compose.prod.yml
 
-                    echo "Validating production Compose file..."
+                    echo "Creating temporary validation environment..."
+
+                    cat > .env <<'EOF'
+DB_NAME=validation
+DB_USER=validation
+DB_PASSWORD=validation
+DB_HOST=postgres
+DB_PORT=5432
+
+SECRET_KEY=validation-secret-key
+DEBUG=False
+
+ALLOWED_HOSTS=localhost
+CORS_ALLOWED_ORIGINS=http://localhost
+CSRF_TRUSTED_ORIGINS=http://localhost
+
+REDIS_URL=redis://redis:6379/0
+
+EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
+EMAIL_HOST=localhost
+EMAIL_PORT=25
+EMAIL_HOST_USER=
+EMAIL_HOST_PASSWORD=
+EMAIL_USE_TLS=False
+EMAIL_USE_SSL=False
+EMAIL_TIMEOUT=10
+
+DEFAULT_FROM_EMAIL=noreply@example.com
+SERVER_EMAIL=server@example.com
+FRONTEND_BASE_URL=http://localhost:3000
+
+SECURE_HSTS_SECONDS=0
+EOF
+
+                    chmod 600 .env
+
+                    cleanup_validation_env() {
+                        rm -f .env
+                    }
+
+                    trap cleanup_validation_env EXIT
+
+                    echo "Running Docker Compose validation..."
 
                     BACKEND_VERSION=validation \
                     FRONTEND_VERSION=validation \
-                    DB_NAME=validation \
-                    DB_USER=validation \
-                    DB_PASSWORD=validation \
-                    docker compose -f docker-compose.prod.yml config --quiet
+                    docker compose \
+                        -f docker-compose.prod.yml \
+                        config --quiet
 
-                    echo "Production Compose file is valid."
+                    echo "Docker Compose configuration is valid."
                 '''
             }
         }
+
+
+        /*
+         * ============================================================
+         * DEPLOY TO CONTABO
+         *
+         * Only the main branch is allowed to deploy production.
+         * Feature branches only validate the infrastructure.
+         * ============================================================
+         */
 
         stage('Deploy to Contabo') {
             when {
@@ -65,6 +140,7 @@ pipeline {
             }
 
             steps {
+
                 withCredentials([
                     sshUserPrivateKey(
                         credentialsId: 'contabo-ssh',
@@ -76,14 +152,18 @@ pipeline {
                     sh '''
                         set -eu
 
-                        echo "Preparing deployment..."
+                        echo "========================================"
+                        echo " Preparing Contabo deployment"
+                        echo "========================================"
 
                         chmod 600 "$SSH_KEY"
 
                         mkdir -p ~/.ssh
-                        ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-                        echo "Copying production Compose file to server..."
+                        ssh-keyscan -H "$DEPLOY_HOST" \
+                            >> ~/.ssh/known_hosts 2>/dev/null || true
+
+                        echo "Copying production Compose file..."
 
                         scp \
                             -i "$SSH_KEY" \
@@ -91,7 +171,11 @@ pipeline {
                             docker-compose.prod.yml \
                             "$SSH_USER@$DEPLOY_HOST:$DEPLOY_DIR/docker-compose.prod.yml"
 
-                        echo "Logging in to Docker Hub on server..."
+                        echo "Docker Compose file copied."
+
+                        echo "========================================"
+                        echo " Logging in to Docker Hub"
+                        echo "========================================"
 
                         printf '%s' "$DOCKERHUB_CREDENTIALS_PSW" | \
                             ssh \
@@ -100,7 +184,11 @@ pipeline {
                                 "$SSH_USER@$DEPLOY_HOST" \
                                 "docker login -u '$DOCKERHUB_CREDENTIALS_USR' --password-stdin"
 
-                        echo "Starting remote deployment..."
+                        echo "Docker Hub login successful."
+
+                        echo "========================================"
+                        echo " Starting remote deployment"
+                        echo "========================================"
 
                         ssh \
                             -i "$SSH_KEY" \
@@ -116,46 +204,105 @@ echo "========================================"
 echo " RetroDoc Production Deployment"
 echo "========================================"
 
-test -f .env
+echo "Deployment directory:"
+echo "$DEPLOY_DIR"
+
+echo "Checking production environment..."
+
+if [ ! -f .env ]; then
+    echo "ERROR: Production .env does not exist:"
+    echo "$DEPLOY_DIR/.env"
+    exit 1
+fi
 
 chmod 600 .env
 
-echo "Reading currently deployed versions..."
+echo "Production environment found."
+
+
+
+# ============================================================
+# READ CURRENT DEPLOYMENT
+# ============================================================
+
+echo "Reading current deployment versions..."
 
 CURRENT_BACKEND=""
 CURRENT_FRONTEND=""
 
 if [ -f .deployed_versions ]; then
-    CURRENT_BACKEND="$(grep '^BACKEND_VERSION=' .deployed_versions | cut -d= -f2- || true)"
-    CURRENT_FRONTEND="$(grep '^FRONTEND_VERSION=' .deployed_versions | cut -d= -f2- || true)"
+
+    CURRENT_BACKEND="$(
+        grep '^BACKEND_VERSION=' .deployed_versions \
+        | cut -d= -f2- || true
+    )"
+
+    CURRENT_FRONTEND="$(
+        grep '^FRONTEND_VERSION=' .deployed_versions \
+        | cut -d= -f2- || true
+    )"
+
 fi
 
-# If Jenkins supplied a version, use it.
-# Otherwise preserve the currently deployed version.
-# If nothing has ever been deployed, use latest.
+
+
+# ============================================================
+# DETERMINE TARGET BACKEND VERSION
+# ============================================================
+
 if [ -n "$BACKEND_VERSION" ]; then
+
     TARGET_BACKEND="$BACKEND_VERSION"
+
 elif [ -n "$CURRENT_BACKEND" ]; then
+
     TARGET_BACKEND="$CURRENT_BACKEND"
+
 else
+
     TARGET_BACKEND="latest"
+
 fi
+
+
+
+# ============================================================
+# DETERMINE TARGET FRONTEND VERSION
+# ============================================================
 
 if [ -n "$FRONTEND_VERSION" ]; then
+
     TARGET_FRONTEND="$FRONTEND_VERSION"
+
 elif [ -n "$CURRENT_FRONTEND" ]; then
+
     TARGET_FRONTEND="$CURRENT_FRONTEND"
+
 else
+
     TARGET_FRONTEND="latest"
+
 fi
 
-echo "Backend image:"
-echo "  $BACKEND_IMAGE:$TARGET_BACKEND"
 
-echo "Frontend image:"
-echo "  $FRONTEND_IMAGE:$TARGET_FRONTEND"
 
-echo "Creating deployment environment..."
+echo "========================================"
+echo " Deployment versions"
+echo "========================================"
+
+echo "Backend:"
+echo "$BACKEND_IMAGE:$TARGET_BACKEND"
+
+echo "Frontend:"
+echo "$FRONTEND_IMAGE:$TARGET_FRONTEND"
+
+
+
+# ============================================================
+# CREATE DEPLOYMENT ENVIRONMENT
+# ============================================================
+
+echo "Creating deployment version file..."
 
 cat > .deployment.env <<EOF
 BACKEND_VERSION=$TARGET_BACKEND
@@ -164,54 +311,116 @@ EOF
 
 chmod 600 .deployment.env
 
-echo "Validating Compose configuration..."
+cleanup_deployment_env() {
+    rm -f .deployment.env
+}
 
-env BACKEND_VERSION="$TARGET_BACKEND" \
+trap cleanup_deployment_env EXIT
+
+
+
+# ============================================================
+# VALIDATE PRODUCTION COMPOSE
+# ============================================================
+
+echo "========================================"
+echo " Validating production Compose"
+echo "========================================"
+
+env \
+    BACKEND_VERSION="$TARGET_BACKEND" \
     FRONTEND_VERSION="$TARGET_FRONTEND" \
     docker compose \
         --env-file .env \
         -f docker-compose.prod.yml \
         config --quiet
 
-echo "Compose configuration is valid."
+echo "Production Compose configuration is valid."
 
-echo "Pulling backend image..."
 
-docker pull "$BACKEND_IMAGE:$TARGET_BACKEND"
 
-echo "Pulling frontend image..."
+# ============================================================
+# PULL IMAGES
+# ============================================================
 
-docker pull "$FRONTEND_IMAGE:$TARGET_FRONTEND"
+echo "========================================"
+echo " Pulling Docker images"
+echo "========================================"
 
-echo "Starting PostgreSQL and Redis..."
+echo "Pulling backend..."
 
-env BACKEND_VERSION="$TARGET_BACKEND" \
+docker pull \
+    "$BACKEND_IMAGE:$TARGET_BACKEND"
+
+echo "Backend image pulled."
+
+echo "Pulling frontend..."
+
+docker pull \
+    "$FRONTEND_IMAGE:$TARGET_FRONTEND"
+
+echo "Frontend image pulled."
+
+
+
+# ============================================================
+# START DATABASE + REDIS
+# ============================================================
+
+echo "========================================"
+echo " Starting PostgreSQL and Redis"
+echo "========================================"
+
+env \
+    BACKEND_VERSION="$TARGET_BACKEND" \
     FRONTEND_VERSION="$TARGET_FRONTEND" \
     docker compose \
         --env-file .env \
         -f docker-compose.prod.yml \
         up -d postgres redis
 
+echo "PostgreSQL and Redis started."
+
 echo "Waiting for infrastructure..."
 
 sleep 10
 
-echo "Starting backend, Celery and frontend..."
 
-env BACKEND_VERSION="$TARGET_BACKEND" \
+
+# ============================================================
+# START APPLICATION SERVICES
+# ============================================================
+
+echo "========================================"
+echo " Starting application services"
+echo "========================================"
+
+env \
+    BACKEND_VERSION="$TARGET_BACKEND" \
     FRONTEND_VERSION="$TARGET_FRONTEND" \
     docker compose \
         --env-file .env \
         -f docker-compose.prod.yml \
         up -d backend celery frontend
 
-echo "Waiting for application containers..."
+echo "Backend, Celery and frontend started."
+
+echo "Waiting for application startup..."
 
 sleep 15
 
-echo "Running database migrations..."
 
-env BACKEND_VERSION="$TARGET_BACKEND" \
+
+# ============================================================
+# DATABASE MIGRATIONS
+# ============================================================
+
+echo "========================================"
+echo " Running Django migrations"
+echo "========================================"
+
+env \
+    BACKEND_VERSION="$TARGET_BACKEND" \
     FRONTEND_VERSION="$TARGET_FRONTEND" \
     docker compose \
         --env-file .env \
@@ -219,9 +428,20 @@ env BACKEND_VERSION="$TARGET_BACKEND" \
         exec -T backend \
         python manage.py migrate --noinput
 
-echo "Collecting static files..."
+echo "Database migrations completed."
 
-env BACKEND_VERSION="$TARGET_BACKEND" \
+
+
+# ============================================================
+# COLLECT STATIC FILES
+# ============================================================
+
+echo "========================================"
+echo " Collecting static files"
+echo "========================================"
+
+env \
+    BACKEND_VERSION="$TARGET_BACKEND" \
     FRONTEND_VERSION="$TARGET_FRONTEND" \
     docker compose \
         --env-file .env \
@@ -229,9 +449,20 @@ env BACKEND_VERSION="$TARGET_BACKEND" \
         exec -T backend \
         python manage.py collectstatic --noinput
 
-echo "Running Django deployment checks..."
+echo "Static files collected."
 
-env BACKEND_VERSION="$TARGET_BACKEND" \
+
+
+# ============================================================
+# DJANGO PRODUCTION CHECK
+# ============================================================
+
+echo "========================================"
+echo " Running Django production checks"
+echo "========================================"
+
+env \
+    BACKEND_VERSION="$TARGET_BACKEND" \
     FRONTEND_VERSION="$TARGET_FRONTEND" \
     docker compose \
         --env-file .env \
@@ -239,19 +470,39 @@ env BACKEND_VERSION="$TARGET_BACKEND" \
         exec -T backend \
         python manage.py check --deploy
 
-echo "Checking container status..."
+echo "Django production checks passed."
 
-env BACKEND_VERSION="$TARGET_BACKEND" \
+
+
+# ============================================================
+# CONTAINER STATUS
+# ============================================================
+
+echo "========================================"
+echo " Container status"
+echo "========================================"
+
+env \
+    BACKEND_VERSION="$TARGET_BACKEND" \
     FRONTEND_VERSION="$TARGET_FRONTEND" \
     docker compose \
         --env-file .env \
         -f docker-compose.prod.yml \
         ps
 
-echo "Checking backend..."
+
+
+# ============================================================
+# BACKEND HEALTH CHECK
+# ============================================================
+
+echo "========================================"
+echo " Checking backend"
+echo "========================================"
 
 BACKEND_STATUS="$(
-    curl -sS \
+    curl \
+        -sS \
         -o /dev/null \
         -w '%{http_code}' \
         http://127.0.0.1:8000/ \
@@ -261,20 +512,37 @@ BACKEND_STATUS="$(
 echo "Backend HTTP status: $BACKEND_STATUS"
 
 case "$BACKEND_STATUS" in
+
     2*|3*|4*)
         echo "Backend is responding."
         ;;
+
     *)
-        echo "Backend health check failed."
-        docker compose --env-file .env -f docker-compose.prod.yml logs --tail=100 backend
+        echo "ERROR: Backend health check failed."
+
+        docker compose \
+            --env-file .env \
+            -f docker-compose.prod.yml \
+            logs --tail=100 backend
+
         exit 1
         ;;
+
 esac
 
-echo "Checking frontend..."
+
+
+# ============================================================
+# FRONTEND HEALTH CHECK
+# ============================================================
+
+echo "========================================"
+echo " Checking frontend"
+echo "========================================"
 
 FRONTEND_STATUS="$(
-    curl -sS \
+    curl \
+        -sS \
         -o /dev/null \
         -w '%{http_code}' \
         http://127.0.0.1:3000/ \
@@ -284,34 +552,65 @@ FRONTEND_STATUS="$(
 echo "Frontend HTTP status: $FRONTEND_STATUS"
 
 case "$FRONTEND_STATUS" in
+
     2*|3*)
         echo "Frontend is healthy."
         ;;
+
     *)
-        echo "Frontend health check failed."
-        docker compose --env-file .env -f docker-compose.prod.yml logs --tail=100 frontend
+        echo "ERROR: Frontend health check failed."
+
+        docker compose \
+            --env-file .env \
+            -f docker-compose.prod.yml \
+            logs --tail=100 frontend
+
         exit 1
         ;;
+
 esac
 
-echo "Checking Celery..."
+
+
+# ============================================================
+# CELERY HEALTH CHECK
+# ============================================================
+
+echo "========================================"
+echo " Checking Celery"
+echo "========================================"
 
 if docker compose \
     --env-file .env \
     -f docker-compose.prod.yml \
-    ps --status running celery | grep -q celery; then
+    ps --status running celery \
+    | grep -q celery
+then
 
     echo "Celery is running."
 
 else
 
-    echo "Celery is not running."
-    docker compose --env-file .env -f docker-compose.prod.yml logs --tail=100 celery
+    echo "ERROR: Celery is not running."
+
+    docker compose \
+        --env-file .env \
+        -f docker-compose.prod.yml \
+        logs --tail=100 celery
+
     exit 1
 
 fi
 
-echo "Saving deployed versions..."
+
+
+# ============================================================
+# SAVE DEPLOYED VERSIONS
+# ============================================================
+
+echo "========================================"
+echo " Recording deployed versions"
+echo "========================================"
 
 cat > .deployed_versions <<EOF
 BACKEND_VERSION=$TARGET_BACKEND
@@ -320,14 +619,35 @@ EOF
 
 chmod 600 .deployed_versions
 
-rm -f .deployment.env
+echo "Deployment versions recorded."
 
+
+
+# ============================================================
+# FINAL STATUS
+# ============================================================
+
+echo ""
 echo "========================================"
-echo " Deployment completed successfully"
+echo " RETRODOC DEPLOYMENT SUCCESSFUL"
 echo "========================================"
 
-echo "Backend:  $BACKEND_IMAGE:$TARGET_BACKEND"
-echo "Frontend: $FRONTEND_IMAGE:$TARGET_FRONTEND"
+echo "Backend:"
+echo "  $BACKEND_IMAGE:$TARGET_BACKEND"
+
+echo "Frontend:"
+echo "  $FRONTEND_IMAGE:$TARGET_FRONTEND"
+
+echo ""
+echo "Services:"
+
+docker compose \
+    --env-file .env \
+    -f docker-compose.prod.yml \
+    ps
+
+echo ""
+echo "Deployment completed successfully."
 
 REMOTE_SCRIPT
                     '''
@@ -336,13 +656,25 @@ REMOTE_SCRIPT
         }
     }
 
+
+    /*
+     * ============================================================
+     * POST ACTIONS
+     * ============================================================
+     */
+
     post {
+
         success {
+            echo '========================================'
             echo 'RetroDoc production deployment completed successfully.'
+            echo '========================================'
         }
 
         failure {
+            echo '========================================'
             echo 'RetroDoc production deployment failed.'
+            echo '========================================'
         }
 
         always {
