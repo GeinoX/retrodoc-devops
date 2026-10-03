@@ -133,10 +133,10 @@ EOF
             steps {
 
                 withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: 'contabo-ssh',
-                        keyFileVariable: 'SSH_KEY',
-                        usernameVariable: 'SSH_USER'
+                    usernamePassword(
+                        credentialsId: 'contabo-password',
+                        usernameVariable: 'SSH_USER',
+                        passwordVariable: 'SSH_PASSWORD'
                     )
                 ]) {
 
@@ -147,31 +147,22 @@ EOF
                         echo " Preparing Contabo deployment"
                         echo "========================================"
 
-                        chmod 600 "$SSH_KEY"
-
-                        mkdir -p ~/.ssh
-
-                        ssh-keyscan -H "$DEPLOY_HOST" \
-                            >> ~/.ssh/known_hosts 2>/dev/null || true
+                        echo "Deploy host: $DEPLOY_HOST"
+                        echo "Deploy user: $SSH_USER"
+                        echo "Deploy directory: $DEPLOY_DIR"
 
 
                         # ====================================================
-                        # VERIFY JENKINS SSH PRIVATE KEY
+                        # VERIFY SSHPASS
                         # ====================================================
 
                         echo "========================================"
-                        echo " Verifying Jenkins SSH private key"
+                        echo " Verifying sshpass"
                         echo "========================================"
 
-                        KEY_FINGERPRINT="$(
-                            ssh-keygen -y -f "$SSH_KEY" \
-                            | ssh-keygen -lf -
-                        )"
+                        command -v sshpass
 
-                        echo "Jenkins SSH key fingerprint:"
-                        echo "$KEY_FINGERPRINT"
-
-                        echo "SSH private key is readable."
+                        echo "sshpass is available."
 
 
                         # ====================================================
@@ -182,12 +173,16 @@ EOF
                         echo " Testing SSH connection to Contabo"
                         echo "========================================"
 
+                        sshpass -p "$SSH_PASSWORD" \
                         ssh \
-                            -i "$SSH_KEY" \
-                            -o BatchMode=yes \
-                            -o StrictHostKeyChecking=yes \
+                            -o StrictHostKeyChecking=no \
+                            -o UserKnownHostsFile=/dev/null \
+                            -o PubkeyAuthentication=no \
+                            -o PreferredAuthentications=password \
                             "$SSH_USER@$DEPLOY_HOST" \
-                            "echo 'SSH connection successful.'"
+                            "echo 'SSH password authentication successful.'"
+
+                        echo "SSH connection successful."
 
 
                         # ====================================================
@@ -198,10 +193,12 @@ EOF
                         echo " Copying production Compose file"
                         echo "========================================"
 
+                        sshpass -p "$SSH_PASSWORD" \
                         scp \
-                            -i "$SSH_KEY" \
-                            -o BatchMode=yes \
-                            -o StrictHostKeyChecking=yes \
+                            -o StrictHostKeyChecking=no \
+                            -o UserKnownHostsFile=/dev/null \
+                            -o PubkeyAuthentication=no \
+                            -o PreferredAuthentications=password \
                             docker-compose.prod.yml \
                             "$SSH_USER@$DEPLOY_HOST:$DEPLOY_DIR/docker-compose.prod.yml"
 
@@ -217,10 +214,12 @@ EOF
                         echo "========================================"
 
                         printf '%s' "$DOCKERHUB_CREDENTIALS_PSW" | \
+                            sshpass -p "$SSH_PASSWORD" \
                             ssh \
-                                -i "$SSH_KEY" \
-                                -o BatchMode=yes \
-                                -o StrictHostKeyChecking=yes \
+                                -o StrictHostKeyChecking=no \
+                                -o UserKnownHostsFile=/dev/null \
+                                -o PubkeyAuthentication=no \
+                                -o PreferredAuthentications=password \
                                 "$SSH_USER@$DEPLOY_HOST" \
                                 "docker login -u '$DOCKERHUB_CREDENTIALS_USR' --password-stdin"
 
@@ -235,10 +234,12 @@ EOF
                         echo " Starting remote deployment"
                         echo "========================================"
 
+                        sshpass -p "$SSH_PASSWORD" \
                         ssh \
-                            -i "$SSH_KEY" \
-                            -o BatchMode=yes \
-                            -o StrictHostKeyChecking=yes \
+                            -o StrictHostKeyChecking=no \
+                            -o UserKnownHostsFile=/dev/null \
+                            -o PubkeyAuthentication=no \
+                            -o PreferredAuthentications=password \
                             "$SSH_USER@$DEPLOY_HOST" \
                             "BACKEND_VERSION='$BACKEND_VERSION' FRONTEND_VERSION='$FRONTEND_VERSION' DEPLOY_DIR='$DEPLOY_DIR' BACKEND_IMAGE='$BACKEND_IMAGE' FRONTEND_IMAGE='$FRONTEND_IMAGE' bash -s" <<'REMOTE_SCRIPT'
 
@@ -720,9 +721,7 @@ REMOTE_SCRIPT
         }
 
         always {
-            sh '''
-                rm -f ~/.ssh/known_hosts 2>/dev/null || true
-            '''
+            echo 'Deployment pipeline finished.'
         }
     }
 }
