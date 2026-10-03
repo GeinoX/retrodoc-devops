@@ -188,16 +188,19 @@ EOF
                             echo " Starting remote deployment"
                             echo "========================================"
 
+                            DEPLOY_BACKEND_VERSION="${DEPLOY_BACKEND_VERSION:-}"
+                            DEPLOY_FRONTEND_VERSION="${DEPLOY_FRONTEND_VERSION:-}"
+
                             if [ -n "$DEPLOY_BACKEND_VERSION" ]; then
                                 echo "Requested backend version: $DEPLOY_BACKEND_VERSION"
                             else
-                                echo "Requested backend version: current/latest"
+                                echo "Requested backend version: current deployment"
                             fi
 
                             if [ -n "$DEPLOY_FRONTEND_VERSION" ]; then
                                 echo "Requested frontend version: $DEPLOY_FRONTEND_VERSION"
                             else
-                                echo "Requested frontend version: current/latest"
+                                echo "Requested frontend version: current deployment"
                             fi
 
                             sshpass -p "$SSH_PASSWORD" \
@@ -220,6 +223,11 @@ echo "========================================"
 echo "Deployment directory:"
 echo "$DEPLOY_DIR"
 
+
+# ============================================================
+# CHECK PRODUCTION ENVIRONMENT
+# ============================================================
+
 echo "========================================"
 echo " Checking production environment"
 echo "========================================"
@@ -233,6 +241,11 @@ fi
 chmod 600 .env
 
 echo "Production environment found."
+
+
+# ============================================================
+# READ CURRENT DEPLOYMENT VERSIONS
+# ============================================================
 
 echo "========================================"
 echo " Reading current deployment versions"
@@ -260,11 +273,16 @@ fi
 echo "Current backend version: ${CURRENT_BACKEND:-none}"
 echo "Current frontend version: ${CURRENT_FRONTEND:-none}"
 
+
+# ============================================================
+# DETERMINE TARGET BACKEND
+# ============================================================
+
 echo "========================================"
-echo " Determining target versions"
+echo " Determining backend version"
 echo "========================================"
 
-if [ -n "$DEPLOY_BACKEND_VERSION" ]; then
+if [ -n "${DEPLOY_BACKEND_VERSION:-}" ]; then
 
     TARGET_BACKEND="$DEPLOY_BACKEND_VERSION"
 
@@ -278,7 +296,19 @@ else
 
 fi
 
-if [ -n "$DEPLOY_FRONTEND_VERSION" ]; then
+echo "Target backend:"
+echo "$BACKEND_IMAGE:$TARGET_BACKEND"
+
+
+# ============================================================
+# DETERMINE TARGET FRONTEND
+# ============================================================
+
+echo "========================================"
+echo " Determining frontend version"
+echo "========================================"
+
+if [ -n "${DEPLOY_FRONTEND_VERSION:-}" ]; then
 
     TARGET_FRONTEND="$DEPLOY_FRONTEND_VERSION"
 
@@ -292,28 +322,13 @@ else
 
 fi
 
-echo "Target backend:"
-echo "$BACKEND_IMAGE:$TARGET_BACKEND"
-
 echo "Target frontend:"
 echo "$FRONTEND_IMAGE:$TARGET_FRONTEND"
 
-echo "========================================"
-echo " Creating temporary deployment environment"
-echo "========================================"
 
-cat > .deployment.env <<EOF
-BACKEND_VERSION=$TARGET_BACKEND
-FRONTEND_VERSION=$TARGET_FRONTEND
-EOF
-
-chmod 600 .deployment.env
-
-cleanup_deployment_env() {
-    rm -f .deployment.env
-}
-
-trap cleanup_deployment_env EXIT
+# ============================================================
+# VALIDATE PRODUCTION COMPOSE
+# ============================================================
 
 echo "========================================"
 echo " Validating production Compose"
@@ -329,6 +344,11 @@ env \
 
 echo "Production Compose configuration is valid."
 
+
+# ============================================================
+# PULL BACKEND IMAGE
+# ============================================================
+
 echo "========================================"
 echo " Pulling backend image"
 echo "========================================"
@@ -337,6 +357,11 @@ docker pull "$BACKEND_IMAGE:$TARGET_BACKEND"
 
 echo "Backend image pulled successfully."
 
+
+# ============================================================
+# PULL FRONTEND IMAGE
+# ============================================================
+
 echo "========================================"
 echo " Pulling frontend image"
 echo "========================================"
@@ -344,6 +369,11 @@ echo "========================================"
 docker pull "$FRONTEND_IMAGE:$TARGET_FRONTEND"
 
 echo "Frontend image pulled successfully."
+
+
+# ============================================================
+# START POSTGRES + REDIS
+# ============================================================
 
 echo "========================================"
 echo " Starting PostgreSQL and Redis"
@@ -361,6 +391,11 @@ echo "PostgreSQL and Redis started."
 
 sleep 10
 
+
+# ============================================================
+# START BACKEND + CELERY + FRONTEND
+# ============================================================
+
 echo "========================================"
 echo " Starting application services"
 echo "========================================"
@@ -373,9 +408,14 @@ env \
         -f docker-compose.prod.yml \
         up -d backend celery frontend
 
-echo "Backend, Celery and frontend started."
+echo "Application services started."
 
 sleep 15
+
+
+# ============================================================
+# DATABASE MIGRATIONS
+# ============================================================
 
 echo "========================================"
 echo " Running Django migrations"
@@ -392,6 +432,11 @@ env \
 
 echo "Database migrations completed."
 
+
+# ============================================================
+# COLLECT STATIC FILES
+# ============================================================
+
 echo "========================================"
 echo " Collecting static files"
 echo "========================================"
@@ -406,6 +451,11 @@ env \
         python manage.py collectstatic --noinput
 
 echo "Static files collected."
+
+
+# ============================================================
+# DJANGO PRODUCTION CHECK
+# ============================================================
 
 echo "========================================"
 echo " Running Django production checks"
@@ -422,6 +472,11 @@ env \
 
 echo "Django production checks passed."
 
+
+# ============================================================
+# CONTAINER STATUS
+# ============================================================
+
 echo "========================================"
 echo " Container status"
 echo "========================================"
@@ -433,6 +488,11 @@ env \
         --env-file .env \
         -f docker-compose.prod.yml \
         ps
+
+
+# ============================================================
+# BACKEND HEALTH CHECK
+# ============================================================
 
 echo "========================================"
 echo " Backend health check"
@@ -468,6 +528,11 @@ case "$BACKEND_STATUS" in
 
 esac
 
+
+# ============================================================
+# FRONTEND HEALTH CHECK
+# ============================================================
+
 echo "========================================"
 echo " Frontend health check"
 echo "========================================"
@@ -502,6 +567,11 @@ case "$FRONTEND_STATUS" in
 
 esac
 
+
+# ============================================================
+# CELERY HEALTH CHECK
+# ============================================================
+
 echo "========================================"
 echo " Celery health check"
 echo "========================================"
@@ -528,6 +598,11 @@ else
 
 fi
 
+
+# ============================================================
+# RECORD DEPLOYMENT VERSIONS
+# ============================================================
+
 echo "========================================"
 echo " Recording deployed versions"
 echo "========================================"
@@ -541,6 +616,11 @@ chmod 600 .deployed_versions
 
 echo "Deployment versions recorded."
 
+
+# ============================================================
+# FINAL STATUS
+# ============================================================
+
 echo ""
 echo "========================================"
 echo " RETRODOC DEPLOYMENT SUCCESSFUL"
@@ -553,7 +633,6 @@ echo "Frontend:"
 echo "  $FRONTEND_IMAGE:$TARGET_FRONTEND"
 
 echo ""
-echo "Running services:"
 
 docker compose \
     --env-file .env \
