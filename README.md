@@ -8,3 +8,4 @@ Runs the whole RetroDoc system (frontend, backend, worker, database, Redis, prox
 2. `make up`
 
 Image names and versions are set in `.env`.
+l1
